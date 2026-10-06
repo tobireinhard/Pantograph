@@ -70,26 +70,50 @@ private def collectTacticNodes (t : Elab.InfoTree) : List TacticInvocation :=
 def collectTactics (t : Elab.InfoTree) : List TacticInvocation :=
   collectTacticNodes t |>.filter fun i => i.info.isSubstantive
 
-/-- Like `collectTactics`, but also records for each invocation the index of its
-closest enclosing substantive invocation. The invocations are appended to `acc` in
-the same (pre-)order as `collectTactics` produces them, and the parent indices refer
-to positions in `acc`. -/
-private partial def collectTacticsWithParent
-    (t : Elab.InfoTree) (context? : Option Elab.ContextInfo) (parent? : Option Nat)
-    (acc : Array (TacticInvocation × Option Nat)) : Array (TacticInvocation × Option Nat) :=
+/-- A tactic invocation together with its position in the nesting of tactics. -/
+private structure NestedTacticInvocation where
+  invocation : TacticInvocation
+  /-- Index of the closest enclosing invocation -/
+  parent? : Option Nat
+  /-- Whether a nested `by` block lies between this invocation and its parent -/
+  parentViaBy : Bool
+
+/-- Whether the syntax of a tactic info node starts a nested tactic block: the `by`
+keyword or a `by` block. Lean records a tactic info for the `by` keyword of every
+nested block, also when a macro such as `have … := by` elaborates the block as a
+separate goal (via `with_annotate_state`). -/
+private def isByBlock (stx : Syntax) : Bool :=
+  stx.isToken "by"
+    || stx.isOfKind ``Lean.Parser.Term.byTactic
+    || stx.isOfKind ``Lean.Parser.Term.byTactic'
+
+/-- Collect the original, substantive tactic invocations of an (unfiltered) info
+tree in pre-order, i.e. the same invocations in the same order as
+`collectTacticsFromCompilationStep` used to produce with `InfoTree.filter` and
+`collectTactics`. In addition, record for each invocation the index of its closest
+enclosing invocation, and whether a nested `by` block lies in between. -/
+private partial def collectNestedTactics
+    (t : Elab.InfoTree) (context? : Option Elab.ContextInfo)
+    (parent? : Option Nat) (viaBy : Bool)
+    (acc : Array NestedTacticInvocation) : Array NestedTacticInvocation :=
   match t with
-  | .context inner t => collectTacticsWithParent t (inner.mergeIntoOuter? context?) parent? acc
+  | .context inner t =>
+    collectNestedTactics t (inner.mergeIntoOuter? context?) parent? viaBy acc
   | .node i children =>
-    -- A substantive tactic becomes the parent of everything below it; other nodes
-    -- pass their own parent on.
-    let (acc, parent?) := match i, context? with
+    -- An original substantive tactic becomes the parent of everything below it.
+    -- A `by` block marks everything below it until the next such tactic. Other
+    -- nodes pass both on.
+    let (acc, parent?, viaBy) := match i, context? with
       | .ofTacticInfo info, some ctx =>
-        if info.isSubstantive then
-          (acc.push (⟨info, ctx, children⟩, parent?), some acc.size)
+        if i.isOriginal && info.isSubstantive then
+          (acc.push { invocation := ⟨info, ctx, children⟩, parent?, parentViaBy := viaBy },
+            some acc.size, false)
         else
-          (acc, parent?)
-      | _, _ => (acc, parent?)
-    children.toList.foldl (fun acc child => collectTacticsWithParent child context? parent? acc) acc
+          (acc, parent?, viaBy || isByBlock info.stx)
+      | .ofTacticInfo info, none => (acc, parent?, viaBy || isByBlock info.stx)
+      | _, _ => (acc, parent?, viaBy)
+    children.toList.foldl
+      (fun acc child => collectNestedTactics child context? parent? viaBy acc) acc
   | .hole _ => acc
 
 /-- Names of the goals in `goals` that are neither assigned nor delayed-assigned
@@ -101,17 +125,15 @@ private def unassignedGoalIds (goals : List MVarId) : MetaM (Array Name) := do
 /-- Collect the tactic invocations of a compilation step.
 
 If `withTreeInfo` is set, each invocation also records the names of its unassigned
-goals before and after the tactic, and the index of its closest enclosing
-invocation. -/
+goals before and after the tactic, the index of its closest enclosing invocation,
+and whether a nested `by` block lies in between. -/
 @[export pantograph_frontend_collect_tactics_from_compilation_step_m]
 def collectTacticsFromCompilationStep (step : CompilationStep) (withTreeInfo : Bool := false)
     : IO (List Protocol.InvokedTactic) := do
-  let tacticInfoTrees := step.trees.flatMap λ tree => tree.filter λ
-    | info@(.ofTacticInfo _) => info.isOriginal
-    | _ => false
-  let tactics := tacticInfoTrees.foldl
-    (fun acc tree => collectTacticsWithParent tree .none .none acc) #[]
-  tactics.toList.mapM λ (invocation, parent) => do
+  -- Traverse the unfiltered trees, since filtering would drop the `by` nodes
+  let tactics := step.trees.foldl
+    (fun acc tree => collectNestedTactics tree .none .none false acc) #[]
+  tactics.toList.mapM λ ⟨invocation, parent, viaBy⟩ => do
     let goalBefore := (Format.joinSep (← invocation.goalState) "\n").pretty
     let goalAfter := (Format.joinSep (← invocation.goalStateAfter) "\n").pretty
     let tactic ← invocation.ctx.runMetaM {} <| Meta.withMCtx invocation.info.mctxBefore do
@@ -138,6 +160,7 @@ def collectTacticsFromCompilationStep (step : CompilationStep) (withTreeInfo : B
       goalIdsBefore?,
       goalIdsAfter?,
       parent? := if withTreeInfo then parent else .none,
+      parentViaBy? := if withTreeInfo then parent.map (λ _ => viaBy) else .none,
     }
 
 structure InfoWithContext where

@@ -65,6 +65,7 @@ example (p : Prop) (hp : p) : p ∧ p := by
   let plain ← collectTacticInvocations env input
   checkTrue "no ids without flag" <| plain.flatten.all λ t =>
     t.goalIdsBefore?.isNone && t.goalIdsAfter?.isNone && t.parent?.isNone
+      && t.parentViaBy?.isNone
 
   let [[t0, t1, t2]] ← collectTacticInvocations env input (withTreeInfo := true)
     | fail "Expected one compilation step with three tactic invocations"
@@ -104,6 +105,39 @@ example (p q : Prop) (hp : p) (hq : q) : p ∧ q := by
   checkTrue "inner exact is nested in have" <|
     ((parentOf iInner).bind (ts[·]?)).any (·.tactic.startsWith "have")
   checkTrue "parents precede children" <| ts.zipIdx.all λ (t, i) => t.parent?.all (· < i)
+  checkEq "inner exact is inside a by block" (ts[iInner]?.bind (·.parentViaBy?)) (.some true)
+  checkTrue "no by flag without parent" <| ts.all λ t => t.parent?.isSome || t.parentViaBy?.isNone
+
+/-- Tactics in a nested `by` block (of `have` and `suffices`) are marked as such,
+tactics in structured tactic syntax (`cases … with`, `case`) are not. -/
+private def test_collect_parent_via_by : Test := λ env => do
+  let input := "
+example (p q : Prop) (h : p ∨ q) : q ∨ p := by
+  cases h with
+  | inl hp => exact Or.inr hp
+  | inr hq => exact Or.inl hq
+
+example (p q : Prop) (h : p ∨ q) : q ∨ p := by
+  cases h
+  case inl hp => exact Or.inr hp
+  case inr hq => exact Or.inl hq
+
+example (a b : Nat) (h : a = b) : b = a := by
+  suffices h' : a = b by exact h'.symm
+  exact h
+  "
+  let [casesWith, caseRename, suff] ← collectTacticInvocations env input (withTreeInfo := true)
+    | fail "Expected three compilation steps"
+  -- For every invocation with a parent: first word of the parent tactic, and the flag
+  let nested (ts : List Protocol.InvokedTactic) : List (String × Bool) :=
+    ts.filterMap λ t => do
+      let i ← t.parent?
+      let p ← ts[i]?
+      let viaBy ← t.parentViaBy?
+      return ((p.tactic.splitOn " ").head!, viaBy)
+  checkEq "cases with" (nested casesWith) [("cases", false), ("cases", false)]
+  checkEq "case with renaming" (nested caseRename) [("case", false), ("case", false)]
+  checkEq "suffices" (nested suff) [("suffices", true)]
 
 def collectNewConstants (env : Environment) (source: String) : IO (List (List Name)) := do
   let (context, state) ← do Frontend.createContextStateFromFile source (env? := env)
@@ -301,6 +335,7 @@ def suite (env : Environment): List (String × IO LSpec.TestSeq) :=
     ("collect_invocations_multiple", test_collect_invocations_multiple),
     ("collect_goal_ids", test_collect_goal_ids),
     ("collect_parent", test_collect_parent),
+    ("collect_parent_via_by", test_collect_parent_via_by),
     ("collect_one_constant", test_collect_one_constant),
     ("collect_one_theorem", test_collect_one_theorem),
     ("collect_stub", test_collect_stub),

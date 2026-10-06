@@ -423,6 +423,9 @@ structure InvokedTactic where
   -- Index of the closest enclosing tactic invocation in the same compilation
   -- step. `none` for top level tactics or when not requested.
   parent?: Option Nat := .none
+  -- Whether a nested `by` block lies between this invocation and its parent, as
+  -- for the tactics in `have … := by …`. Only present if there is a parent.
+  parentViaBy?: Option Bool := .none
   deriving ToJson
 
 structure CompilationUnit where
