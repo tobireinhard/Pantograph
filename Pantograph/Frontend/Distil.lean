@@ -70,8 +70,19 @@ private def collectTacticNodes (t : Elab.InfoTree) : List TacticInvocation :=
 def collectTactics (t : Elab.InfoTree) : List TacticInvocation :=
   collectTacticNodes t |>.filter fun i => i.info.isSubstantive
 
+/-- Names of the goals in `goals` that are neither assigned nor delayed-assigned
+in the current metavariable context. -/
+private def unassignedGoalIds (goals : List MVarId) : MetaM (Array Name) := do
+  let goals ← goals.filterM fun goal => return !(← goal.isAssignedOrDelayedAssigned)
+  return goals.toArray.map (·.name)
+
+/-- Collect the tactic invocations of a compilation step.
+
+If `withGoalIds` is set, each invocation also records the names of its unassigned
+goals before and after the tactic. -/
 @[export pantograph_frontend_collect_tactics_from_compilation_step_m]
-def collectTacticsFromCompilationStep (step : CompilationStep) : IO (List Protocol.InvokedTactic) := do
+def collectTacticsFromCompilationStep (step : CompilationStep) (withGoalIds : Bool := false)
+    : IO (List Protocol.InvokedTactic) := do
   let tacticInfoTrees := step.trees.flatMap λ tree => tree.filter λ
     | info@(.ofTacticInfo _) => info.isOriginal
     | _ => false
@@ -85,11 +96,23 @@ def collectTacticsFromCompilationStep (step : CompilationStep) : IO (List Protoc
       --PrettyPrinter.ppTactic ⟨invocation.info.stx⟩
       --return t.pretty
     let usedConstants := invocation.usedConstants.toArray
+    -- The goals are filtered inside `runMetaMGoals{Before,After}`, so that the
+    -- check uses `mctxBefore` and `mctxAfter` respectively.
+    let goalIdsBefore? : Option (Array Name) ← if withGoalIds then
+        some <$> invocation.runMetaMGoalsBefore unassignedGoalIds
+      else
+        pure .none
+    let goalIdsAfter? : Option (Array Name) ← if withGoalIds then
+        some <$> invocation.runMetaMGoalsAfter unassignedGoalIds
+      else
+        pure .none
     return {
       goalBefore,
       goalAfter,
       tactic,
       usedConstants,
+      goalIdsBefore?,
+      goalIdsAfter?,
     }
 
 structure InfoWithContext where

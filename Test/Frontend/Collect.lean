@@ -27,10 +27,11 @@ example : ∀ (n : Nat), n + 1 = Nat.succ n := by
   let errors ← runFrontend env sketch λ step => step.msgs.mapM (·.toString)
   checkEq "errors" errors [[], []]
 
-def collectTacticInvocations (env : Environment) (source : String) : IO (List (List Protocol.InvokedTactic)) := do
+def collectTacticInvocations (env : Environment) (source : String) (withGoalIds : Bool := false)
+    : IO (List (List Protocol.InvokedTactic)) := do
   let (context, state) ← do Frontend.createContextStateFromFile source (env? := env)
   let m := show FrontendM _ from Frontend.mapCompilationSteps λ step => show FrontendM _ from do
-    collectTacticsFromCompilationStep step
+    collectTacticsFromCompilationStep step withGoalIds
   m.run {} |>.run context |>.run' state
 
 private def test_collect_invocations_multiple : Test := λ env => do
@@ -49,6 +50,37 @@ example : α → α := by
   "
   let invocations ← collectTacticInvocations env input
   checkEq "numbers" (invocations.map (·.length)) [6, 2]
+
+/-- Goal ids link the tactics: the goals created by `constructor` are passed on,
+the remaining goal is carried along by the first `exact`, and the root goal is
+consumed. -/
+private def test_collect_goal_ids : Test := λ env => do
+  let input := "
+example (p : Prop) (hp : p) : p ∧ p := by
+  constructor
+  exact hp
+  exact hp
+  "
+  -- Without the flag, no goal ids are recorded
+  let plain ← collectTacticInvocations env input
+  checkTrue "no ids without flag" <| plain.flatten.all λ t =>
+    t.goalIdsBefore?.isNone && t.goalIdsAfter?.isNone
+
+  let [[t0, t1, t2]] ← collectTacticInvocations env input (withGoalIds := true)
+    | fail "Expected one compilation step with three tactic invocations"
+  checkEq "tactics" [t0.tactic, t1.tactic, t2.tactic] ["constructor", "exact hp", "exact hp"]
+  checkTrue "ids with flag" <| [t0, t1, t2].all λ t =>
+    t.goalIdsBefore?.isSome && t.goalIdsAfter?.isSome
+  let ids := λ (t : Protocol.InvokedTactic) => (t.goalIdsBefore?.getD #[], t.goalIdsAfter?.getD #[])
+  let (b0, a0) := ids t0
+  let (b1, a1) := ids t1
+  let (b2, a2) := ids t2
+  checkEq "sizes" [(b0.size, a0.size), (b1.size, a1.size), (b2.size, a2.size)]
+    [(1, 2), (2, 1), (1, 0)]
+  checkEq "goals of constructor are passed on" b1 a0
+  checkEq "remaining goal is carried along" b2 a1
+  checkEq "remaining goal was created by constructor" b2 #[a0[1]!]
+  checkTrue "root goal is consumed" <| !(a0 ++ b1 ++ a1 ++ b2 ++ a2).contains b0[0]!
 
 def collectNewConstants (env : Environment) (source: String) : IO (List (List Name)) := do
   let (context, state) ← do Frontend.createContextStateFromFile source (env? := env)
@@ -244,6 +276,7 @@ def suite (env : Environment): List (String × IO LSpec.TestSeq) :=
   let tests := [
     ("open", test_open),
     ("collect_invocations_multiple", test_collect_invocations_multiple),
+    ("collect_goal_ids", test_collect_goal_ids),
     ("collect_one_constant", test_collect_one_constant),
     ("collect_one_theorem", test_collect_one_theorem),
     ("collect_stub", test_collect_stub),

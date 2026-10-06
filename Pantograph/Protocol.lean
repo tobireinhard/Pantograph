@@ -412,6 +412,11 @@ structure InvokedTactic where
 
   -- List of used constants
   usedConstants: Array Name
+
+  -- Names of the unassigned goals (metavariables) before and after the tactic.
+  -- Only populated on request; omitted from the JSON output when `none`.
+  goalIdsBefore?: Option (Array Name) := .none
+  goalIdsAfter?: Option (Array Name) := .none
   deriving ToJson
 
 structure CompilationUnit where
