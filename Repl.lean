@@ -379,6 +379,7 @@ def frontend_process (args : Protocol.FrontendProcess) : EMainM Protocol.Fronten
     let boundary := (step.src.startPos.byteIdx, step.src.stopPos.byteIdx)
     let invocations: Option (List Protocol.InvokedTactic) ← if args.invocations?.isSome then
         Frontend.collectTacticsFromCompilationStep step
+          (withTreeInfo := args.invocationTreeInfo?.getD false)
       else
         pure []
     let messages ← step.msgs.toArray.mapM (·.serialize)

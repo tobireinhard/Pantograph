@@ -402,6 +402,9 @@ structure FrontendProcess where
   inheritEnv : Bool := false
   -- collect tactic invocations and output to a given file
   invocations?: Option String := .none
+  -- also record goal ids and parent indices of the tactic invocations.
+  -- Optional, so that clients which do not send it keep working.
+  invocationTreeInfo?: Option Bool := .none
   -- list new constants from each compilation step
   newConstants: Bool := false
   deriving FromJson
@@ -417,6 +420,9 @@ structure InvokedTactic where
   -- Only populated on request; omitted from the JSON output when `none`.
   goalIdsBefore?: Option (Array Name) := .none
   goalIdsAfter?: Option (Array Name) := .none
+  -- Index of the closest enclosing tactic invocation in the same compilation
+  -- step. `none` for top level tactics or when not requested.
+  parent?: Option Nat := .none
   deriving ToJson
 
 structure CompilationUnit where

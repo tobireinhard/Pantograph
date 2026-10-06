@@ -70,6 +70,28 @@ private def collectTacticNodes (t : Elab.InfoTree) : List TacticInvocation :=
 def collectTactics (t : Elab.InfoTree) : List TacticInvocation :=
   collectTacticNodes t |>.filter fun i => i.info.isSubstantive
 
+/-- Like `collectTactics`, but also records for each invocation the index of its
+closest enclosing substantive invocation. The invocations are appended to `acc` in
+the same (pre-)order as `collectTactics` produces them, and the parent indices refer
+to positions in `acc`. -/
+private partial def collectTacticsWithParent
+    (t : Elab.InfoTree) (context? : Option Elab.ContextInfo) (parent? : Option Nat)
+    (acc : Array (TacticInvocation × Option Nat)) : Array (TacticInvocation × Option Nat) :=
+  match t with
+  | .context inner t => collectTacticsWithParent t (inner.mergeIntoOuter? context?) parent? acc
+  | .node i children =>
+    -- A substantive tactic becomes the parent of everything below it; other nodes
+    -- pass their own parent on.
+    let (acc, parent?) := match i, context? with
+      | .ofTacticInfo info, some ctx =>
+        if info.isSubstantive then
+          (acc.push (⟨info, ctx, children⟩, parent?), some acc.size)
+        else
+          (acc, parent?)
+      | _, _ => (acc, parent?)
+    children.toList.foldl (fun acc child => collectTacticsWithParent child context? parent? acc) acc
+  | .hole _ => acc
+
 /-- Names of the goals in `goals` that are neither assigned nor delayed-assigned
 in the current metavariable context. -/
 private def unassignedGoalIds (goals : List MVarId) : MetaM (Array Name) := do
@@ -78,16 +100,18 @@ private def unassignedGoalIds (goals : List MVarId) : MetaM (Array Name) := do
 
 /-- Collect the tactic invocations of a compilation step.
 
-If `withGoalIds` is set, each invocation also records the names of its unassigned
-goals before and after the tactic. -/
+If `withTreeInfo` is set, each invocation also records the names of its unassigned
+goals before and after the tactic, and the index of its closest enclosing
+invocation. -/
 @[export pantograph_frontend_collect_tactics_from_compilation_step_m]
-def collectTacticsFromCompilationStep (step : CompilationStep) (withGoalIds : Bool := false)
+def collectTacticsFromCompilationStep (step : CompilationStep) (withTreeInfo : Bool := false)
     : IO (List Protocol.InvokedTactic) := do
   let tacticInfoTrees := step.trees.flatMap λ tree => tree.filter λ
     | info@(.ofTacticInfo _) => info.isOriginal
     | _ => false
-  let tactics := tacticInfoTrees.flatMap collectTactics
-  tactics.mapM λ invocation => do
+  let tactics := tacticInfoTrees.foldl
+    (fun acc tree => collectTacticsWithParent tree .none .none acc) #[]
+  tactics.toList.mapM λ (invocation, parent) => do
     let goalBefore := (Format.joinSep (← invocation.goalState) "\n").pretty
     let goalAfter := (Format.joinSep (← invocation.goalStateAfter) "\n").pretty
     let tactic ← invocation.ctx.runMetaM {} <| Meta.withMCtx invocation.info.mctxBefore do
@@ -98,11 +122,11 @@ def collectTacticsFromCompilationStep (step : CompilationStep) (withGoalIds : Bo
     let usedConstants := invocation.usedConstants.toArray
     -- The goals are filtered inside `runMetaMGoals{Before,After}`, so that the
     -- check uses `mctxBefore` and `mctxAfter` respectively.
-    let goalIdsBefore? : Option (Array Name) ← if withGoalIds then
+    let goalIdsBefore? : Option (Array Name) ← if withTreeInfo then
         some <$> invocation.runMetaMGoalsBefore unassignedGoalIds
       else
         pure .none
-    let goalIdsAfter? : Option (Array Name) ← if withGoalIds then
+    let goalIdsAfter? : Option (Array Name) ← if withTreeInfo then
         some <$> invocation.runMetaMGoalsAfter unassignedGoalIds
       else
         pure .none
@@ -113,6 +137,7 @@ def collectTacticsFromCompilationStep (step : CompilationStep) (withGoalIds : Bo
       usedConstants,
       goalIdsBefore?,
       goalIdsAfter?,
+      parent? := if withTreeInfo then parent else .none,
     }
 
 structure InfoWithContext where

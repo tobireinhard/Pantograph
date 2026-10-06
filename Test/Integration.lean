@@ -302,6 +302,38 @@ def test_frontend_process_invocations : Test := do
         ]
     } ] }
 
+def test_frontend_process_invocations_tree_info : Test := do
+  let file := "example : ∀ (p q: Prop), p → p ∨ q := by\n  intro p q h\n  exact Or.inl h"
+  IO.FS.withTempDir λ tempdir => do
+  let filename := s!"{tempdir}/invocations.jsonl"
+  step "frontend.process"
+    ({
+      file? := .some file,
+      invocations? := .some filename,
+      invocationTreeInfo? := .some true,
+    }: Protocol.FrontendProcess)
+   ({
+     units := [{
+       boundary := (0, file.utf8ByteSize),
+       nInvocations? := .some 2,
+     }],
+   }: Protocol.FrontendProcessResult)
+  -- Goal names are not predictable, so only check how they are linked
+  let .ok data := Lean.Json.parse (← IO.FS.readFile filename)
+    | fail "Invalid JSON"
+  let .ok [unit] := data.getObjValAs? (List Lean.Json) "units"
+    | fail "Expected one unit"
+  let .ok [t0, t1] := unit.getObjValAs? (List Lean.Json) "invocations"
+    | fail "Expected two invocations"
+  let ids (t : Lean.Json) (key : String) := t.getObjValAs? (Array String) key |>.toOption
+  checkEq "intro: one goal before and after"
+    ((ids t0 "goalIdsBefore").map (·.size), (ids t0 "goalIdsAfter").map (·.size))
+    (.some 1, .some 1)
+  checkEq "goal of intro is passed on" (ids t1 "goalIdsBefore") (ids t0 "goalIdsAfter")
+  checkEq "exact closes the goal" (ids t1 "goalIdsAfter") (.some #[])
+  checkTrue "top level tactics have no parent" <|
+    !(t0.getObjVal? "parent").isOk && !(t1.getObjVal? "parent").isOk
+
 def test_frontend_process_import_open : Test := do
   let header := "import Init\nopen Nat\nuniverse u"
   let goal1: Protocol.Goal := {
@@ -449,6 +481,7 @@ def suite (env : Lean.Environment): List (String × IO LSpec.TestSeq) :=
     ("env.add env.inspect", test_env_add_inspect),
 
     ("frontend.process invocations", test_frontend_process_invocations),
+    ("frontend.process invocations tree info", test_frontend_process_invocations_tree_info),
     ("frontend.process import", test_frontend_process_import_open),
     ("frontend.track", test_frontend_track),
     ("frontend.distil simple", test_frontend_distil_simple),

@@ -27,11 +27,11 @@ example : ∀ (n : Nat), n + 1 = Nat.succ n := by
   let errors ← runFrontend env sketch λ step => step.msgs.mapM (·.toString)
   checkEq "errors" errors [[], []]
 
-def collectTacticInvocations (env : Environment) (source : String) (withGoalIds : Bool := false)
+def collectTacticInvocations (env : Environment) (source : String) (withTreeInfo : Bool := false)
     : IO (List (List Protocol.InvokedTactic)) := do
   let (context, state) ← do Frontend.createContextStateFromFile source (env? := env)
   let m := show FrontendM _ from Frontend.mapCompilationSteps λ step => show FrontendM _ from do
-    collectTacticsFromCompilationStep step withGoalIds
+    collectTacticsFromCompilationStep step withTreeInfo
   m.run {} |>.run context |>.run' state
 
 private def test_collect_invocations_multiple : Test := λ env => do
@@ -64,9 +64,9 @@ example (p : Prop) (hp : p) : p ∧ p := by
   -- Without the flag, no goal ids are recorded
   let plain ← collectTacticInvocations env input
   checkTrue "no ids without flag" <| plain.flatten.all λ t =>
-    t.goalIdsBefore?.isNone && t.goalIdsAfter?.isNone
+    t.goalIdsBefore?.isNone && t.goalIdsAfter?.isNone && t.parent?.isNone
 
-  let [[t0, t1, t2]] ← collectTacticInvocations env input (withGoalIds := true)
+  let [[t0, t1, t2]] ← collectTacticInvocations env input (withTreeInfo := true)
     | fail "Expected one compilation step with three tactic invocations"
   checkEq "tactics" [t0.tactic, t1.tactic, t2.tactic] ["constructor", "exact hp", "exact hp"]
   checkTrue "ids with flag" <| [t0, t1, t2].all λ t =>
@@ -81,6 +81,29 @@ example (p : Prop) (hp : p) : p ∧ p := by
   checkEq "remaining goal is carried along" b2 a1
   checkEq "remaining goal was created by constructor" b2 #[a0[1]!]
   checkTrue "root goal is consumed" <| !(a0 ++ b1 ++ a1 ++ b2 ++ a2).contains b0[0]!
+  -- Tactics in the same tactic sequence are siblings, not children
+  checkEq "parents" [t0.parent?, t1.parent?, t2.parent?] [.none, .none, .none]
+
+/-- The tactics of the inner `by` block of a `have` are nested under the `have`. -/
+private def test_collect_parent : Test := λ env => do
+  let input := "
+example (p q : Prop) (hp : p) (hq : q) : p ∧ q := by
+  have h : q := by exact hq
+  exact ⟨hp, h⟩
+  "
+  let [ts] ← collectTacticInvocations env input (withTreeInfo := true)
+    | fail "Expected one compilation step"
+  let indexOf (pred : String → Bool) : Option Nat := ts.findIdx? (pred ·.tactic)
+  let some iHave := indexOf (·.startsWith "have") | fail "No `have` invocation"
+  let some iInner := indexOf (· == "exact hq") | fail "No inner `exact` invocation"
+  let some iOuter := indexOf (·.startsWith "exact ⟨") | fail "No outer `exact` invocation"
+  let parentOf (i : Nat) : Option Nat := ts[i]?.bind (·.parent?)
+  checkEq "have is top level" (parentOf iHave) .none
+  checkEq "outer exact is top level" (parentOf iOuter) .none
+  -- Robust against duplicated `have` nodes from macro expansion
+  checkTrue "inner exact is nested in have" <|
+    ((parentOf iInner).bind (ts[·]?)).any (·.tactic.startsWith "have")
+  checkTrue "parents precede children" <| ts.zipIdx.all λ (t, i) => t.parent?.all (· < i)
 
 def collectNewConstants (env : Environment) (source: String) : IO (List (List Name)) := do
   let (context, state) ← do Frontend.createContextStateFromFile source (env? := env)
@@ -277,6 +300,7 @@ def suite (env : Environment): List (String × IO LSpec.TestSeq) :=
     ("open", test_open),
     ("collect_invocations_multiple", test_collect_invocations_multiple),
     ("collect_goal_ids", test_collect_goal_ids),
+    ("collect_parent", test_collect_parent),
     ("collect_one_constant", test_collect_one_constant),
     ("collect_one_theorem", test_collect_one_theorem),
     ("collect_stub", test_collect_stub),
